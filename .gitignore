@@ -1,0 +1,17 @@
+.env
+.venv/
+config/*.local.yaml
+config/cameras.yaml
+config/calibration.yaml
+config/certs/
+*.pt
+*.onnx
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+web/node_modules/
+
+HACKATHON_ADAPTATION_PLAN.md
