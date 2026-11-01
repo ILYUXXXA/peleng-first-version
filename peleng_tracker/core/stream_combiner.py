@@ -176,58 +176,44 @@ class StreamCombinerTrack(VideoStreamTrack):
         print(f"🎬 Creating stream captures for {len(self.enabled_streams)} streams")
 
         for stream in self.enabled_streams:
-            stream_id = stream["id"]
-            stream_url = stream["url"]
-            stream_name = stream["name"]
+            self.open_stream(stream)
 
-            if stream_url.startswith("phone://"):
-                self.stream_status[stream_id] = "initializing"
-                continue
+    def open_stream(self, stream: dict) -> None:
+        """Open or replace one network stream without rebuilding the other captures."""
+        stream_id = stream["id"]
+        stream_url = stream["url"]
+        stream_name = stream["name"]
+        if stream_url.startswith("phone://"):
+            self.stream_status[stream_id] = "initializing"
+            return
 
-            try:
-                # Simple direct capture - OpenCV will use FFmpeg backend automatically
-                logger.info(f"📹 Opening stream {stream_name} (ID: {stream_id}): {stream_url}")
-                print(f"📹 Opening stream {stream_name} (ID: {stream_id}): {stream_url}")
+        try:
+            import os  # noqa: PLC0415
 
-                # Set environment variable to control FFmpeg timeout
-                import os  # noqa: PLC0415
-
-                # Increase timeout to 60 seconds for IP cameras, use TCP transport
-                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-                    "rtsp_transport;tcp|timeout;60000000|buffer_size;1024000|max_delay;5000000"
-                )
-
-                # Explicitly use FFmpeg backend to avoid GStreamer warnings
-                self.stream_caps[stream_id] = cv2.VideoCapture(stream_url, cv2.CAP_FFMPEG)
-
-                # Set timeout and buffer properties before checking if opened
-                self.stream_caps[stream_id].set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 60000)  # 60 second timeout
-                self.stream_caps[stream_id].set(
-                    cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000
-                )  # 5 second read timeout (shorter for responsiveness)
-
-                # Set some buffer properties to reduce latency but allow some buffering for stability
-                if self.stream_caps[stream_id].isOpened():
-                    # Set buffer size to 2-3 frames to handle network jitter while maintaining low latency
-                    self.stream_caps[stream_id].set(cv2.CAP_PROP_BUFFERSIZE, 3)
-                    # Set FPS to match expected camera FPS
-                    self.stream_caps[stream_id].set(cv2.CAP_PROP_FPS, 30)
-                    logger.info(f"✅ Stream {stream_id} opened successfully")
-                    print(f"✅ Stream {stream_id} opened successfully")
-                else:
-                    logger.warning(f"⚠️ Stream {stream_id} failed to open immediately, will retry...")
-                    print(f"⚠️ Stream {stream_id} failed to open immediately, will retry...")
-
-                # Initialize stream status
-                self.stream_status[stream_id] = "initializing"
-                # Set timeout based on 4G mode
-                is_4g_stream = os.getenv("4G_MODE", "false").lower() == "true"
-                timeout_seconds = 60.0 if is_4g_stream else 30.0
-                self.stream_init_timeout[stream_id] = time.time() + timeout_seconds
-
-            except Exception as e:
-                logger.error(f"❌ Failed to initialize stream {stream_id} ({stream_name}): {e}")
-                self.stream_status[stream_id] = "error"
+            old_capture = self.stream_caps.pop(stream_id, None)
+            if old_capture is not None:
+                with contextlib.suppress(Exception):
+                    old_capture.release()
+            logger.info("📹 Opening stream %s (ID: %s)", stream_name, stream_id)
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                "rtsp_transport;tcp|timeout;60000000|buffer_size;1024000|max_delay;5000000"
+            )
+            capture = cv2.VideoCapture(stream_url, cv2.CAP_FFMPEG)
+            capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 60000)
+            capture.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+            self.stream_caps[stream_id] = capture
+            if capture.isOpened():
+                capture.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+                capture.set(cv2.CAP_PROP_FPS, 30)
+                logger.info("✅ Stream %s opened successfully", stream_id)
+            else:
+                logger.warning("⚠️ Stream %s did not open immediately", stream_id)
+            self.stream_status[stream_id] = "initializing"
+            timeout_seconds = 60.0 if os.getenv("4G_MODE", "false").lower() == "true" else 30.0
+            self.stream_init_timeout[stream_id] = time.time() + timeout_seconds
+        except Exception as error:
+            logger.error("❌ Failed to initialize stream %s (%s): %s", stream_id, stream_name, error)
+            self.stream_status[stream_id] = "error"
 
     async def recv(self):
         """Receive frames from individual streams, apply delays via frame skipping, and combine manually"""
@@ -271,7 +257,7 @@ class StreamCombinerTrack(VideoStreamTrack):
 
             # === CAPTURE FRESH FRAMES FROM EACH STREAM ===
             fresh_frames = {}
-            for stream_id, cap in self.stream_caps.items():
+            for stream_id, cap in list(self.stream_caps.items()):
                 ret, frame = cap.read()
                 if ret and frame is not None:
                     if frame.shape[:2] != (individual_height, individual_width):
@@ -521,9 +507,8 @@ class StreamCombinerTrack(VideoStreamTrack):
         return [stream["id"] for stream in self.enabled_streams if stream["url"].startswith("phone://")]
 
     def register_stream(self, stream: dict) -> None:
-        """Add a phone source without interrupting existing RTSP/WebRTC streams."""
-        if stream["id"] in self.active_stream_ids:
-            return
+        """Add or replace one source without interrupting unrelated streams."""
+        self.enabled_streams = [item for item in self.enabled_streams if item["id"] != stream["id"]]
         self.enabled_streams.append(stream)
         self.enabled_streams.sort(key=lambda item: item["id"])
         self.active_stream_ids = [item["id"] for item in self.enabled_streams]
@@ -536,6 +521,11 @@ class StreamCombinerTrack(VideoStreamTrack):
         self.stream_status[stream_id] = "initializing"
         self.stream_init_timeout[stream_id] = time.time() + 30.0
         self.frame_read_stats[stream_id] = {"success": 0, "failures": 0, "last_failure_time": 0}
+        if stream["url"].startswith("phone://"):
+            old_capture = self.stream_caps.pop(stream_id, None)
+            if old_capture is not None:
+                with contextlib.suppress(Exception):
+                    old_capture.release()
 
     async def _process_frame_vision(self, frames: dict[int, np.ndarray], frame_id: int):
         """Multi-stream vision processing with synchronized timestamps"""
@@ -783,10 +773,25 @@ class StreamCombinerManager:
 
     def register_phone_camera(self, camera_id: int, name: str) -> None:
         stream = {"id": camera_id, "name": name, "url": f"phone://{camera_id}", "enabled": True}
+        self.register_camera(stream)
+
+    def register_camera(self, stream: dict) -> None:
+        """Register a runtime source while preserving all other configured cameras."""
         ServerConfig.add_or_update_stream(stream)
         if self.track is not None:
             self.track.register_stream(stream)
         self.is_running = True
+
+    def open_camera_stream(self, camera_id: int) -> None:
+        """Open a registered network source; intended for a FastAPI background task."""
+        if self.track is None:
+            return
+        try:
+            stream = ServerConfig.get_stream_by_id(camera_id)
+        except ValueError:
+            return
+        if stream.get("enabled", True):
+            self.track.open_stream(stream)
 
     def is_alive(self) -> bool:
         """Check if the combiner is alive"""

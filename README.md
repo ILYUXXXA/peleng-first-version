@@ -14,10 +14,12 @@ cd web && npm ci && npm run build && cd ..
 ## Запуск
 
 ```bash
-uv run peleng-tracker run --config config/hackathon.yaml
+./run.sh
 ```
 
-Dashboard откроется на `http://127.0.0.1:8000`. При первом запуске Ultralytics может скачать выбранные веса. Для запуска vision нажмите соответствующую кнопку API `POST /api/cameras/tracking/start` или используйте Dashboard после подключения потоков.
+Скрипт создаст локальный `config/hackathon.local.yaml`, установит зависимости, соберёт интерфейс и запустит приложение. Другой конфиг можно передать первым аргументом: `./run.sh config/phone.local.yaml`.
+
+Dashboard откроется на `http://127.0.0.1:8000`. При первом запуске Ultralytics может скачать выбранные веса. Для запуска vision нажмите `Start vision` после подключения потоков.
 
 ## Камеры
 
@@ -37,6 +39,8 @@ uv run peleng-tracker run --config config/hackathon.local.yaml
 ```
 
 Локальные конфиги, веса и калибровка исключены из Git. Не помещайте логины или пароли в example-файлы.
+
+Камеру также можно добавить без перезапуска: откройте `Calibration / Settings` → `Добавить камеру`, укажите уникальный Camera ID, название и RTSP/RTSPS/RTMP/HTTP-ссылку. Добавленный через UI источник хранится только до перезапуска сервера; логин и пароль не возвращаются обратно в интерфейс. Для постоянной конфигурации оставьте URL в ignored-конфиге или environment variable.
 
 ## Телефон как камера
 

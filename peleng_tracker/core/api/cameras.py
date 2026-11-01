@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from typing import Annotated
+from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Query, UploadFile
+from pydantic import BaseModel, Field, field_validator
 
 from ...phone_frames import phone_frames
 from ..config import ServerConfig
@@ -28,6 +29,48 @@ class StreamDelaysRequest(BaseModel):
     delays: dict[str, int]
 
 
+class CameraSourceRequest(BaseModel):
+    id: int = Field(ge=0)
+    name: str = Field(min_length=1, max_length=80)
+    url: str = Field(min_length=1, max_length=2048)
+    enabled: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, value: str) -> str:
+        try:
+            parsed = urlsplit(value.strip())
+            hostname, _ = parsed.hostname, parsed.port
+        except ValueError as error:
+            raise ValueError("camera URL is malformed") from error
+        if parsed.scheme.lower() not in {"rtsp", "rtsps", "rtmp", "http", "https"}:
+            raise ValueError("supported schemes: rtsp, rtsps, rtmp, http, https")
+        if not hostname:
+            raise ValueError("camera URL must contain a host")
+        return value.strip()
+
+
+def _redact_stream(stream: dict[str, object]) -> dict[str, object]:
+    result = dict(stream)
+    raw_url = str(result.get("url", result.get("stream_url", "")))
+    if raw_url.startswith("phone://"):
+        safe_url = raw_url
+    else:
+        parsed = urlsplit(raw_url)
+        host = parsed.hostname or ""
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        if parsed.username is not None:
+            host = f"***@{host}"
+        safe_url = urlunsplit((parsed.scheme, host, parsed.path, "***" if parsed.query else "", ""))
+    result["url"] = safe_url
+    if "stream_url" in result:
+        result["stream_url"] = safe_url
+    return result
+
+
 @router.get("")
 @router.get("/")
 async def get_cameras() -> list[dict[str, object]]:
@@ -36,7 +79,7 @@ async def get_cameras() -> list[dict[str, object]]:
         {
             "id": stream["id"],
             "name": stream["name"],
-            "stream_url": stream["url"],
+            "stream_url": _redact_stream(stream)["url"],
             "enabled": stream.get("enabled", True),
             "status": (
                 "ready"
@@ -53,9 +96,25 @@ async def get_camera_config() -> dict[str, object]:
     width, height = ServerConfig.get_individual_resolution()
     combined_width, combined_height = ServerConfig.get_combined_resolution()
     return {
-        "cameras": ServerConfig.get_enabled_streams(),
+        "cameras": [_redact_stream(stream) for stream in ServerConfig.get_enabled_streams()],
         "individual_resolution": {"width": width, "height": height},
         "combined_resolution": {"width": combined_width, "height": combined_height},
+    }
+
+
+@router.post("", status_code=201)
+@router.post("/", status_code=201)
+async def add_camera(
+    request: CameraSourceRequest, background_tasks: BackgroundTasks
+) -> dict[str, object]:
+    stream = request.model_dump()
+    stream_combiner_manager.register_camera(stream)
+    if request.enabled:
+        background_tasks.add_task(stream_combiner_manager.open_camera_stream, request.id)
+    return {
+        "camera": _redact_stream(stream),
+        "persistent": False,
+        "message": "camera registered for this server session",
     }
 
 
@@ -127,6 +186,6 @@ async def phone_camera_status(camera_id: int) -> dict[str, object]:
 @router.get("/{camera_id}")
 async def get_camera(camera_id: int) -> dict[str, object]:
     try:
-        return ServerConfig.get_stream_by_id(camera_id)
+        return _redact_stream(ServerConfig.get_stream_by_id(camera_id))
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error

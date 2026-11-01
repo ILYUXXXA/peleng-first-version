@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import { VisionWebSocketService, type VisionMetadata } from './services/VisionWebSocket'
-import { WebRTCManager } from './services/WebRTCManager'
+import { WebRTCManager, type WebRTCState } from './services/WebRTCManager'
 import { PhonePublisher } from './PhonePublisher'
 
 type Screen = 'dashboard' | 'world' | 'settings'
@@ -14,6 +14,13 @@ type Status = {
   avg_processing_time_ms: number
   calibration: { valid: boolean; camera_ids: number[] }
   target: { state: string; mode?: string }
+}
+type Camera = {
+  id: number
+  name: string
+  stream_url: string
+  enabled: boolean
+  status: string
 }
 
 const emptyStatus: Status = {
@@ -35,7 +42,13 @@ function DesktopApp() {
   const [weights, setWeights] = useState('yolo26n.pt')
   const [tracker, setTracker] = useState('deepsort')
   const [notice, setNotice] = useState('')
+  const [cameraNotice, setCameraNotice] = useState('')
+  const [cameras, setCameras] = useState<Camera[]>([])
+  const [cameraForm, setCameraForm] = useState({ id: '0', name: 'iPhone RTSP', url: '' })
   const [cameraSize, setCameraSize] = useState({ width: 720, height: 480 })
+  const [mediaStream, setMediaStream] = useState<MediaStream | null>(null)
+  const [webrtcState, setWebRTCState] = useState<WebRTCState>('connecting')
+  const videoRef = useRef<HTMLVideoElement | null>(null)
   const webrtc = useRef<WebRTCManager | null>(null)
 
   const refreshStatus = async () => {
@@ -48,15 +61,21 @@ function DesktopApp() {
     }
   }
 
+  const refreshCameras = async () => {
+    const response = await fetch('/api/cameras')
+    if (response.ok) setCameras(await response.json() as Camera[])
+  }
+
   useEffect(() => {
     refreshStatus().catch(() => undefined)
+    refreshCameras().catch(() => undefined)
     fetch('/api/cameras/config').then(response => response.json()).then(data => setCameraSize(data.individual_resolution)).catch(() => undefined)
     const vision = new VisionWebSocketService()
     vision.onMessage = message => {
       if (message.type === 'vision_metadata') setMetadata(message)
     }
     vision.connect()
-    const rtc = new WebRTCManager()
+    const rtc = new WebRTCManager(setMediaStream, setWebRTCState)
     rtc.connect()
     webrtc.current = rtc
     const timer = window.setTimeout(() => rtc.startCombinedStream().catch(() => undefined), 300)
@@ -66,6 +85,16 @@ function DesktopApp() {
       rtc.disconnect()
     }
   }, [])
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (screen !== 'dashboard' || !video || !mediaStream) return
+    video.srcObject = mediaStream
+    video.play().catch(() => setWebRTCState('failed'))
+    return () => {
+      if (video.srcObject === mediaStream) video.srcObject = null
+    }
+  }, [mediaStream, screen])
 
   const tracks = useMemo(
     () => Object.entries(metadata?.all_streams ?? {}).flatMap(([cameraId, stream]) =>
@@ -110,6 +139,29 @@ function DesktopApp() {
     await refreshStatus()
   }
 
+  const addCamera = async () => {
+    setCameraNotice('Подключаем источник…')
+    const response = await fetch('/api/cameras', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: Number(cameraForm.id),
+        name: cameraForm.name,
+        url: cameraForm.url,
+        enabled: true,
+      }),
+    })
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Не удалось добавить камеру' }))
+      const detail = Array.isArray(error.detail) ? error.detail[0]?.msg : error.detail
+      setCameraNotice(detail ?? 'Не удалось добавить камеру')
+      return
+    }
+    setCameraForm(current => ({ ...current, url: '' }))
+    setCameraNotice('Камера добавлена. Подключение продолжается в фоне.')
+    await refreshCameras()
+  }
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -124,7 +176,7 @@ function DesktopApp() {
       {screen === 'dashboard' && <main className="dashboard">
         <section className="video-panel panel">
           <div className="section-title"><div><p className="eyebrow">Live</p><h2>Объединённый поток</h2></div><span>{metadata?.active_stream_ids.length ?? 0} камер</span></div>
-          <div className="video-stage"><video id="combined-video-main" autoPlay playsInline muted /><div className="video-empty">Ожидание WebRTC-потока</div>
+          <div className="video-stage"><video ref={videoRef} id="combined-video-main" autoPlay playsInline muted onPlaying={() => setWebRTCState('playing')} /><div className={`video-empty ${webrtcState === 'playing' ? 'hidden' : ''}`}>{webrtcState === 'failed' ? 'Ошибка WebRTC — обновите страницу' : webrtcState === 'disconnected' ? 'WebRTC отключён' : 'Подключаем WebRTC-поток…'}</div>
             <div className="box-overlay">{tracks.map(track => {
               const cameraIds = metadata?.active_stream_ids ?? []
               const index = Math.max(0, cameraIds.indexOf(track.cameraId))
@@ -168,6 +220,20 @@ function DesktopApp() {
         </section>
         <section className="panel"><p className="eyebrow">Calibration</p><h2>{status.calibration.valid ? 'ready' : 'unavailable'}</h2><p>{status.calibration.camera_ids.length} откалиброванных камер</p>
           <label>Calibration YAML / JSON<input type="file" accept=".yaml,.yml,.json" onChange={async event => { const file = event.target.files?.[0]; if (!file) return; await fetch('/api/calibration/3d', { method: 'POST', headers: { 'Content-Type': file.name.endsWith('.json') ? 'application/json' : 'application/yaml' }, body: await file.text() }); await refreshStatus() }} /></label>
+        </section>
+        <section className="panel camera-settings"><p className="eyebrow">Runtime source</p><h2>Добавить камеру</h2>
+          <p className="muted">Поддерживаются RTSP, RTSPS, RTMP и HTTP/MJPEG. Источник действует до перезапуска сервера.</p>
+          <div className="camera-fields">
+            <label>Camera ID<input type="number" min="0" value={cameraForm.id} onChange={event => setCameraForm(current => ({ ...current, id: event.target.value }))} /></label>
+            <label>Название<input value={cameraForm.name} maxLength={80} onChange={event => setCameraForm(current => ({ ...current, name: event.target.value }))} /></label>
+          </div>
+          <label>Ссылка на поток<input type="url" value={cameraForm.url} placeholder="rtsp://user:password@192.168.1.20:8554/live" autoComplete="off" spellCheck={false} onChange={event => setCameraForm(current => ({ ...current, url: event.target.value }))} /></label>
+          <button className="primary" disabled={!cameraForm.name.trim() || !cameraForm.url.trim()} onClick={addCamera}>Добавить без перезапуска</button>
+          {cameraNotice && <p className="notice">{cameraNotice}</p>}
+          <div className="camera-list" aria-live="polite">
+            {cameras.map(camera => <article key={camera.id}><div><strong>{camera.name}</strong><small>camera {camera.id}</small></div><code>{camera.stream_url}</code><span className={`camera-status ${camera.status}`}>{camera.status}</span></article>)}
+            {!cameras.length && <p className="muted">Камеры пока не добавлены.</p>}
+          </div>
         </section>
       </main>}
     </div>
