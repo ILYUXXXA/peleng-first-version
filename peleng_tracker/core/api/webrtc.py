@@ -6,6 +6,7 @@ Much simpler than the FFmpeg subprocess + RTSP approach!
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any
 
 from aiortc import RTCConfiguration, RTCIceServer, RTCPeerConnection, RTCSessionDescription
@@ -90,11 +91,18 @@ class StreamConnection:
             await self.pc.setLocalDescription(answer)
 
             logger.info(f"✅ Created answer for stream combiner connection {self.connection_id}")
+            local_sdp = self.pc.localDescription.sdp
+            candidate_count = sum(1 for line in local_sdp.splitlines() if line.startswith("a=candidate:"))
             logger.info(
-                f"📊 States - PC: {self.pc.connectionState}, ICE: {self.pc.iceConnectionState}, Signaling: {self.pc.signalingState}"
+                "WebRTC local description ready for %s: %s ICE candidates; PC=%s ICE=%s signaling=%s",
+                self.connection_id,
+                candidate_count,
+                self.pc.connectionState,
+                self.pc.iceConnectionState,
+                self.pc.signalingState,
             )
 
-            return self.pc.localDescription.sdp
+            return local_sdp
 
         except InvalidStateError as e:
             logger.error(f"Invalid state error for connection {self.connection_id}: {e}")
@@ -164,26 +172,28 @@ class StreamManager:
         try:
             # Close WebRTC connection if it exists
             if connection_id in self.webrtc_connections:
-                webrtc_conn = self.webrtc_connections[connection_id]
+                webrtc_conn = self.webrtc_connections.pop(connection_id)
                 await webrtc_conn.close()
-                del self.webrtc_connections[connection_id]
 
-            # Remove WebSocket
-            if connection_id in self.websockets:
-                del self.websockets[connection_id]
-                logger.info(f"WebSocket connection {connection_id} closed")
+            # Remove WebSocket only if it is still the same session. A reconnect
+            # may already have installed a newer socket under this identifier.
+            self.websockets.pop(connection_id, None)
+            logger.info(f"WebSocket connection {connection_id} closed")
 
         except Exception as e:
             logger.error(f"Error during disconnect cleanup for {connection_id}: {e}")
 
     async def send_message(self, connection_id: str, message: dict[str, Any]):
         """Send a message to a specific connection"""
-        if connection_id in self.websockets:
-            try:
-                await self.websockets[connection_id].send_text(json.dumps(message))
-            except Exception as e:
-                logger.error(f"Error sending message to {connection_id}: {e}")
-                asyncio.create_task(self.disconnect(connection_id))
+        websocket = self.websockets.get(connection_id)
+        if websocket is None or websocket.client_state.name != "CONNECTED":
+            return
+        try:
+            await websocket.send_text(json.dumps(message))
+        except Exception as e:
+            logger.info(f"WebSocket {connection_id} closed before message could be sent: {e}")
+            # Do not schedule cleanup by id here: the id may already belong
+            # to a newer reconnecting browser session.
 
 
 # Global manager instance
@@ -194,7 +204,10 @@ manager = StreamManager()
 async def websocket_endpoint(websocket: WebSocket, connection_id: str | None = None):
     """WebSocket endpoint for stream combiner WebRTC signaling"""
     if not connection_id:
-        connection_id = f"stream_conn_{len(manager.websockets)}"
+        # Never reuse an identifier based on the current dictionary size:
+        # overlapping disconnect/reconnect cleanup can otherwise target a new
+        # WebRTC session that happens to receive the same id.
+        connection_id = f"stream_conn_{uuid.uuid4().hex}"
 
     try:
         await manager.connect_websocket(websocket, connection_id)
@@ -250,6 +263,9 @@ async def websocket_endpoint(websocket: WebSocket, connection_id: str | None = N
                 await manager.send_message(
                     connection_id, {"type": "error", "message": "Invalid JSON format", "error_type": "protocol"}
                 )
+            except WebSocketDisconnect:
+                logger.info(f"WebSocket {connection_id} disconnected while processing a message")
+                break
             except Exception as e:
                 logger.error(f"Error processing message from {connection_id}: {e}")
                 break
@@ -299,6 +315,16 @@ async def handle_stream_offer(connection_id: str, message: dict[str, Any]):
                 f"Timeout creating WebRTC answer after {ServerConfig.WEBRTC_TIMEOUTS['answer_timeout']}s"
             ) from e
 
+        # The browser can navigate away or close its signaling socket while
+        # ICE gathering is in progress. Do not send an answer to a dead session.
+        websocket = manager.websockets.get(connection_id)
+        if websocket is None or websocket.client_state.name != "CONNECTED":
+            logger.info(f"Discarding WebRTC answer for disconnected client {connection_id}")
+            if manager.webrtc_connections.get(connection_id) is webrtc_conn:
+                manager.webrtc_connections.pop(connection_id, None)
+                await webrtc_conn.close()
+            return
+
         # Send answer back to client
         response = {"type": "answer", "sdp": answer_sdp}
 
@@ -324,9 +350,10 @@ async def handle_stream_offer(connection_id: str, message: dict[str, Any]):
         )
 
         # Clean up failed connection
-        if connection_id in manager.webrtc_connections:
-            await manager.webrtc_connections[connection_id].close()
-            del manager.webrtc_connections[connection_id]
+        failed_conn = manager.webrtc_connections.get(connection_id)
+        if failed_conn is not None:
+            manager.webrtc_connections.pop(connection_id, None)
+            await failed_conn.close()
 
 
 async def handle_start_stream(connection_id: str, _message: dict[str, Any]):

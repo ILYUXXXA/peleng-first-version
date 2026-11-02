@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import threading
 import time
 import webbrowser
@@ -67,10 +68,18 @@ class PelengTrackerApp:
         logger.info("Peleng Tracker started at %s", self.server_url)
 
     def _run_server(self) -> None:
-        loop = asyncio.new_event_loop()
+        # ProactorEventLoop can emit an uncaught ConnectionResetError from
+        # _call_connection_lost when a phone/browser closes an HTTPS connection.
+        # SelectorEventLoop handles these ordinary peer disconnects without
+        # the noisy Proactor callback on Windows.
+        loop = asyncio.SelectorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        if self.server is not None:
-            loop.run_until_complete(self.server.serve())
+        try:
+            if self.server is not None:
+                loop.run_until_complete(self.server.serve())
+        finally:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
 
     def stop(self) -> None:
         if self.server is not None:
