@@ -47,7 +47,6 @@ export class WebRTCManager {
     if (this.starting) return
     this.starting = true
     this.pendingStart = false
-    this.starting = false
     this.peer?.close()
     const peer = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
     this.peer = peer
@@ -101,6 +100,7 @@ export class WebRTCManager {
 
   disconnect(): void {
     this.pendingStart = false
+    this.starting = false
     this.peer?.close()
     this.peer = null
     this.socket?.close(1000)
