@@ -175,7 +175,7 @@ function DesktopApp() {
 
       {screen === 'dashboard' && <main className="dashboard">
         <section className="video-panel panel">
-          <div className="section-title"><div><p className="eyebrow">Live</p><h2>Объединённый поток</h2></div><span>{metadata?.active_stream_ids.length ?? 0} камер</span></div>
+          <div className="section-title"><div><p className="eyebrow">Live</p><h2>Объединённый поток</h2></div><span>{cameras.length} камер</span></div>
           <div className="video-stage"><video ref={videoRef} id="combined-video-main" autoPlay playsInline muted onPlaying={() => setWebRTCState('playing')} /><div className={`video-empty ${webrtcState === 'playing' ? 'hidden' : ''}`}>{webrtcState === 'failed' ? 'Ошибка WebRTC — обновите страницу' : webrtcState === 'disconnected' ? 'WebRTC отключён' : 'Подключаем WebRTC-поток…'}</div>
             <div className="box-overlay">{tracks.map(track => {
               const cameraIds = metadata?.active_stream_ids ?? []
