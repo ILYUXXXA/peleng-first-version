@@ -13,7 +13,7 @@ class ServerConfig:
     SERVER_PORT = int(os.getenv("PELENG_TRACKER_PORT", "8000"))
     SERVER_RELOAD = False
     CORS_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
-    STUN_SERVERS = ["stun:stun.l.google.com:19302"]
+    # LAN-first: host candidates are sufficient for devices on the same Wi-Fi.\n    # Set PELENG_WEBRTC_STUN_SERVERS to a comma-separated list when clients\n    # connect across routed networks/NAT.\n    STUN_SERVERS = [\n        server.strip()\n        for server in os.getenv("PELENG_WEBRTC_STUN_SERVERS", "").split(",")\n        if server.strip()\n    ]
     WEBRTC_TIMEOUTS = {
         "answer_timeout": 20.0,
         "ice_timeout": 30.0,
