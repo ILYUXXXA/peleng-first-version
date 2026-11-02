@@ -91,11 +91,18 @@ class StreamConnection:
             await self.pc.setLocalDescription(answer)
 
             logger.info(f"✅ Created answer for stream combiner connection {self.connection_id}")
+            local_sdp = self.pc.localDescription.sdp
+            candidate_count = sum(1 for line in local_sdp.splitlines() if line.startswith("a=candidate:"))
             logger.info(
-                f"📊 States - PC: {self.pc.connectionState}, ICE: {self.pc.iceConnectionState}, Signaling: {self.pc.signalingState}"
+                "WebRTC local description ready for %s: %s ICE candidates; PC=%s ICE=%s signaling=%s",
+                self.connection_id,
+                candidate_count,
+                self.pc.connectionState,
+                self.pc.iceConnectionState,
+                self.pc.signalingState,
             )
 
-            return self.pc.localDescription.sdp
+            return local_sdp
 
         except InvalidStateError as e:
             logger.error(f"Invalid state error for connection {self.connection_id}: {e}")
